@@ -1,0 +1,338 @@
+name: ANT CLI Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  merge_group:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cli-tests:
+    name: "ANT CLI Tests"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build CLI binary
+        run: cargo build --release --bin ant
+        timeout-minutes: 30
+
+      - name: Start Autonomi Network
+        uses: maidsafe/autonomi-actions/spawn-autonomi-network@v1
+        with:
+          autonomi-version: 'stable-2025.7.1.3'
+          node-count: '25'
+          enable-evm: 'true'
+
+      - name: Check network environment variables
+        shell: bash
+        run: |
+          if [[ -z "$ANT_PEERS" ]]; then
+            echo "❌ ANT_PEERS variable not set"
+            exit 1
+          elif [[ -z "$EVM_NETWORK" ]]; then
+            echo "❌ EVM_NETWORK variable not set"
+            exit 1
+          else
+            echo "✅ ANT_PEERS: $ANT_PEERS"
+            echo "✅ EVM_NETWORK: $EVM_NETWORK"
+          fi
+
+      - name: Set default secret key
+        shell: bash
+        run: echo "SECRET_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" >> $GITHUB_ENV
+
+      - name: Create test directories
+        shell: bash
+        run: mkdir -p test_upload test_download
+
+      - name: Run basic CLI tests
+        shell: bash
+        run: |
+          set -e
+          
+          echo "🧪 Testing file cost estimation..."
+          ./target/release/ant --local file cost ./Cargo.toml
+          
+          echo "🧪 Testing file upload..."
+          ./target/release/ant --local file upload ./Cargo.toml > upload_output 2>&1
+          cat upload_output
+          
+          # Extract address from upload output
+          ADDRESS=$(rg "At address: ([0-9a-f]+)" -o -r '$1' ./upload_output || rg "to: ([0-9a-f]+)" -o -r '$1' ./upload_output)
+          echo "File uploaded to address: $ADDRESS"
+          
+          if [[ -z "$ADDRESS" ]]; then
+            echo "❌ Failed to extract file address"
+            exit 1
+          fi
+          
+          echo "🧪 Testing file download..."
+          ./target/release/ant --local file download "$ADDRESS" test_download/downloaded_file
+          
+          # Verify download
+          if [[ -f "test_download/downloaded_file" ]]; then
+            echo "✅ File download successful"
+          else
+            echo "❌ File download failed"
+            exit 1
+          fi
+        env:
+          ANT_LOG: "v"
+        timeout-minutes: 15
+
+      - name: Run register tests
+        shell: bash
+        run: |
+          set -e
+          
+          echo "🧪 Testing register key generation..."
+          ./target/release/ant --local register generate-key
+          
+          echo "🧪 Testing register creation..."
+          ./target/release/ant --local register create test_register "test_value" > register_output 2>&1
+          cat register_output
+          
+          # Extract register address
+          REG_ADDRESS=$(rg "Register created at address: ([0-9a-f]+)" -o -r '$1' ./register_output)
+          echo "Register created at address: $REG_ADDRESS"
+          
+          if [[ -z "$REG_ADDRESS" ]]; then
+            echo "❌ Failed to extract register address"
+            exit 1
+          fi
+          
+          echo "🧪 Testing register retrieval..."
+          ./target/release/ant --local register get "$REG_ADDRESS"
+          
+          echo "🧪 Testing register editing..."
+          ./target/release/ant --local register edit "$REG_ADDRESS" "updated_value"
+          
+          echo "🧪 Testing register retrieval after edit..."
+          ./target/release/ant --local register get "$REG_ADDRESS"
+        env:
+          ANT_LOG: "v"
+        timeout-minutes: 15
+
+      - name: Run vault tests
+        shell: bash
+        run: |
+          set -e
+          
+          echo "🧪 Testing vault cost estimation..."
+          ./target/release/ant --local vault cost
+          
+          echo "🧪 Testing vault creation..."
+          ./target/release/ant --local vault create
+          
+          echo "🧪 Testing vault loading..."
+          ./target/release/ant --local vault load
+          
+          echo "🧪 Testing vault sync..."
+          ./target/release/ant --local vault sync
+        env:
+          ANT_LOG: "v"
+        timeout-minutes: 15
+
+      - name: Test wallet operations
+        shell: bash
+        run: |
+          set -e
+          
+          echo "🧪 Testing wallet creation..."
+          ./target/release/ant --local wallet create --no-password
+          
+          echo "🧪 Testing wallet balance..."
+          ./target/release/ant --local wallet balance
+        env:
+          ANT_LOG: "v"
+        timeout-minutes: 10
+
+      - name: Cleanup Autonomi Network
+        if: always()
+        uses: maidsafe/autonomi-actions/cleanup-autonomi-network@v1
+        with:
+          upload-logs: 'true'
+          keep-directories: 'false'
+
+  cli-tests-windows:
+    name: "ANT CLI Tests (Windows)"
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build CLI binary
+        run: cargo build --release --bin ant
+        timeout-minutes: 30
+
+      - name: Start Autonomi Network
+        uses: maidsafe/autonomi-actions/spawn-autonomi-network@v1
+        with:
+          autonomi-version: 'stable-2025.7.1.3'
+          node-count: '25'
+          enable-evm: 'true'
+
+      - name: Check network environment variables
+        shell: pwsh
+        run: |
+          if (-not $env:ANT_PEERS) {
+            Write-Host "❌ ANT_PEERS variable not set"
+            exit 1
+          } elseif (-not $env:EVM_NETWORK) {
+            Write-Host "❌ EVM_NETWORK variable not set"
+            exit 1
+          } else {
+            Write-Host "✅ ANT_PEERS: $env:ANT_PEERS"
+            Write-Host "✅ EVM_NETWORK: $env:EVM_NETWORK"
+          }
+
+      - name: Set default secret key
+        shell: pwsh
+        run: |
+          "SECRET_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Create test directories
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "test_upload"
+          New-Item -ItemType Directory -Force -Path "test_download"
+
+      - name: Run basic CLI tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          
+          Write-Host "🧪 Testing file cost estimation..."
+          & ".\target\release\ant.exe" --local file cost .\Cargo.toml
+          
+          Write-Host "🧪 Testing file upload..."
+          & ".\target\release\ant.exe" --local file upload .\Cargo.toml > upload_output 2>&1
+          Get-Content upload_output
+          
+          # Extract address from upload output
+          $content = Get-Content upload_output -Raw
+          $match = [regex]::Match($content, "At address: ([0-9a-f]+)")
+          if (-not $match.Success) {
+            $match = [regex]::Match($content, "to: ([0-9a-f]+)")
+          }
+          
+          if ($match.Success) {
+            $ADDRESS = $match.Groups[1].Value
+            Write-Host "File uploaded to address: $ADDRESS"
+          } else {
+            Write-Host "❌ Failed to extract file address"
+            exit 1
+          }
+          
+          Write-Host "🧪 Testing file download..."
+          & ".\target\release\ant.exe" --local file download $ADDRESS "test_download\downloaded_file"
+          
+          # Verify download
+          if (Test-Path "test_download\downloaded_file") {
+            Write-Host "✅ File download successful"
+          } else {
+            Write-Host "❌ File download failed"
+            exit 1
+          }
+        env:
+          ANT_LOG: "v"
+        timeout-minutes: 15
+
+      - name: Run register tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          
+          Write-Host "🧪 Testing register key generation..."
+          & ".\target\release\ant.exe" --local register generate-key
+          
+          Write-Host "🧪 Testing register creation..."
+          & ".\target\release\ant.exe" --local register create test_register "test_value" > register_output 2>&1
+          Get-Content register_output
+          
+          # Extract register address
+          $content = Get-Content register_output -Raw
+          $match = [regex]::Match($content, "Register created at address: ([0-9a-f]+)")
+          
+          if ($match.Success) {
+            $REG_ADDRESS = $match.Groups[1].Value
+            Write-Host "Register created at address: $REG_ADDRESS"
+          } else {
+            Write-Host "❌ Failed to extract register address"
+            exit 1
+          }
+          
+          Write-Host "🧪 Testing register retrieval..."
+          & ".\target\release\ant.exe" --local register get $REG_ADDRESS
+          
+          Write-Host "🧪 Testing register editing..."
+          & ".\target\release\ant.exe" --local register edit $REG_ADDRESS "updated_value"
+          
+          Write-Host "🧪 Testing register retrieval after edit..."
+          & ".\target\release\ant.exe" --local register get $REG_ADDRESS
+        env:
+          ANT_LOG: "v"
+        timeout-minutes: 15
+
+      - name: Run vault tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          
+          Write-Host "🧪 Testing vault cost estimation..."
+          & ".\target\release\ant.exe" --local vault cost
+          
+          Write-Host "🧪 Testing vault creation..."
+          & ".\target\release\ant.exe" --local vault create
+          
+          Write-Host "🧪 Testing vault loading..."
+          & ".\target\release\ant.exe" --local vault load
+          
+          Write-Host "🧪 Testing vault sync..."
+          & ".\target\release\ant.exe" --local vault sync
+        env:
+          ANT_LOG: "v"
+        timeout-minutes: 15
+
+      - name: Test wallet operations
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          
+          Write-Host "🧪 Testing wallet creation..."
+          & ".\target\release\ant.exe" --local wallet create --no-password
+          
+          Write-Host "🧪 Testing wallet balance..."
+          & ".\target\release\ant.exe" --local wallet balance
+        env:
+          ANT_LOG: "v"
+        timeout-minutes: 10
+
+      - name: Cleanup Autonomi Network
+        if: always()
+        uses: maidsafe/autonomi-actions/cleanup-autonomi-network@v1
+        with:
+          upload-logs: 'true'
+          keep-directories: 'false'
